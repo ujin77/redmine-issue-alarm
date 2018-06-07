@@ -43,7 +43,7 @@ DATA_HEAD = {
     'head': '',
     'project': '',
     'sla': 'No',
-    'desc': 'Issues with status "New"',
+    'desc': '',
     'id': "id",
     'subject': "Subject",
     'priority': "Priority",
