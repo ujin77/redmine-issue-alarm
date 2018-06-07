@@ -35,14 +35,14 @@ DEFAULT_CONFIG = {
     },
 }
 
-P_ISSUES = {'sort': 'id', 'status_id': 1}
+DEFAULT_PARAMS = {'sort': 'id', 'limit': 100}
 RM_DATE_FMT = '%Y-%m-%dT%H:%M:%SZ'
 FILTER_RM_DATE_FMT = '{}{:%Y-%m-%dT%H:%M:%SZ}'
 
 DATA_HEAD = {
     'head': '',
     'project': '',
-    'sla': 'No',
+    'sla': '',
     'desc': '',
     'id': "id",
     'subject': "Subject",
@@ -78,6 +78,7 @@ HTML_HEAD_FORMAT=u'''<P>
 <TABLE>
 <TR><TH>{subject:s}</TH><TH>{priority:s}</TH><TH>{created_on:s}</TH><TH>{delta}</TH></TR>
 '''
+HTML_HEAD_FORMAT2=u'<TABLE><TR><TH>{subject:s}</TH><TH>{priority:s}</TH><TH>{created_on:s}</TH><TH>{delta}</TH></TR>\n'
 HTML_DATA_FORMAT=u"""<TR><TD><A href='{url}/issues/{id:d}'><B>#{id:d}</B></A> {subject:s}</TD><TD>{priority:s}</TD><TD>{created_on:%Y-%m-%d %H:%M}</TD><TD>{delta}</TD></TR>\n"""
 HTML_FOOT_FORMAT=u'</TABLE><BR>\n'
 HTML_FORMAT = """
@@ -146,6 +147,33 @@ def get_sla_delta(sla):
     return FILTER_RM_DATE_FMT.format('<=', delta_from_now(days=7))
 
 
+def debug_value(data, key=''):
+    if data:
+        if data.has_key(key):
+            print "DEBUG:", key, '=', data[key]
+
+
+class requestParams(object):
+
+    def __init__(self, default_params={}):
+        super(requestParams, self).__init__()
+        self.params = default_params
+
+    def add(self, key, val):
+        self.params[key] = val
+
+    def dump(self):
+        print json.dumps(self.params, indent=2, ensure_ascii=False)
+
+    def get(self):
+        return self.params
+
+    def url(self, url=None):
+        if url:
+            return url + '&'.join(str('%s=%s' % item) for item in self.params.items())
+        return '&'.join(str('%s=%s' % item) for item in self.params.items())
+
+
 class RmClient(object):
 
     _redmine = None
@@ -162,13 +190,13 @@ class RmClient(object):
         self._verbose = _conf['verbose']
         self._debug = _conf['debug']
 
-    def _request_url(self, _req=''):
+    def _request_url(self, _req='', params=requestParams()):
         if self._debug:
-            print 'DEBUG: url: %s/%s' % (self._redmine['url'], _req)
-        return '%s/%s' % (self._redmine['url'], _req)
+            print 'DEBUG: url:', params.url('%s/%s?' % (self._redmine['url'], _req))
+        return params.url('%s/%s?' % (self._redmine['url'], _req))
 
-    def _request(self, _req):
-        req = urllib2.Request(url=self._request_url(_req))
+    def request(self, _req, params=None):
+        req = urllib2.Request(url=self._request_url(_req, params))
         req.add_header('X-Redmine-API-Key', self._redmine['api-key'])
         try:
             response = urllib2.urlopen(req).read()
@@ -179,15 +207,17 @@ class RmClient(object):
             print e
             return {}
         if self._debug:
-            print json.dumps(json.loads(response), indent=2, ensure_ascii=False)
+            resp = json.loads(response)
+            debug_value(resp, 'offset')
+            debug_value(resp, 'total_count')
+            debug_value(resp, 'limit')
+            # print json.dumps(json.loads(response), indent=2, ensure_ascii=False)
         return json.loads(response)
-
-    def request(self, _req, params={}):
-        return self._request(_filter(_req, params))
 
     def get_projects(self):
         self.data_exists = False
-        response = self.request('projects.json')
+        rp = requestParams(DEFAULT_PARAMS)
+        response = self.request('projects.json', rp)
         if response.has_key('projects'):
             for project in response['projects']:
                 if project.has_key('custom_fields'):
@@ -198,9 +228,10 @@ class RmClient(object):
                 print REPORT_FOOT_FORMAT.format('')
 
     def _issues(self, project, sla, status):
-        P_ISSUES['project_id'] = project['id']
-        P_ISSUES['created_on'] = get_sla_delta(sla)
-        P_ISSUES['status_id'] = status
+        rp = requestParams(DEFAULT_PARAMS)
+        rp.add('project_id', project['id'])
+        rp.add('created_on', get_sla_delta(sla))
+        rp.add('status_id', status)
         DATA_HEAD['project'] = project['name']
         DATA_HEAD['sla'] = sla
         DATA_HEAD['desc'] = SLA[sla]
@@ -208,7 +239,7 @@ class RmClient(object):
         self._html += HTML_HEAD_FORMAT.format(**DATA_HEAD)
         if self._verbose:
             print REPORT_HEAD_FORMAT.format(**DATA_HEAD)
-        response = self.request('issues.json', P_ISSUES)
+        response = self.request('issues.json', rp)
         if response.has_key('issues'):
             for issue in response['issues']:
                 self.data_exists = True
@@ -224,6 +255,31 @@ class RmClient(object):
 
     def get_new_issues(self, project, sla):
         self._issues(project, sla, 1)
+
+    def get_without_due_date(self):
+        self._mail['subject'] = '[ALARM] Issues without due date'
+        DATA_HEAD['delta'] = 'Project'
+        DATA_BODY['url'] = self._redmine['url']
+        self._html += HTML_HEAD_FORMAT2.format(**DATA_HEAD)
+
+        rp = requestParams(DEFAULT_PARAMS)
+        rp.add('status', 'open')
+        response = self.request('issues.json', rp)
+        if response.has_key('issues'):
+            if self._verbose:
+                print REPORT_HEAD_FORMAT.format(**DATA_HEAD)
+            for issue in response['issues']:
+                if not issue.has_key('due_date'):
+                    self.data_exists = True
+                    DATA_BODY['id'] = issue["id"]
+                    DATA_BODY['subject'] = issue["subject"]
+                    DATA_BODY['priority'] = issue["priority"]["name"]
+                    DATA_BODY['created_on'] = from_rm_date(issue["created_on"])
+                    DATA_BODY['delta'] = issue["project"]["name"]
+                    self._html += HTML_DATA_FORMAT.format(**DATA_BODY)
+                    if self._verbose:
+                        print REPORT_DATA_FORMAT.format(**DATA_BODY)
+            self._html += HTML_FOOT_FORMAT
 
     def send_mail(self):
         if self._debug:
@@ -273,6 +329,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=PROG_DESC)
     parser.add_argument('-c', '--config', default='/etc/'+ PROG +'.conf')
     parser.add_argument('-f', '--fix', action='store_true', help="Fix the due date")
+    parser.add_argument('-w', '--wdd', action='store_true', help="Issues without due date")
     parser.add_argument('-s', '--send', action='store_true', help="Send notifications")
     parser.add_argument('-d', '--debug', action='store_true', help="Debug output")
     parser.add_argument('-v', '--verbose', action='store_true', help="Verbose output")
@@ -283,13 +340,15 @@ if __name__ == "__main__":
     DEFAULT_CONFIG['verbose'] = args.verbose
     DEFAULT_CONFIG['debug'] = args.debug
 
-    if args.debug:
-        print 'CONFIG:', json.dumps(DEFAULT_CONFIG, indent=2)
+    # if args.debug:
+    #     print 'CONFIG:', json.dumps(DEFAULT_CONFIG, indent=2)
 
     rm = RmClient(DEFAULT_CONFIG)
-    if args.fix or args.send:
-        rm = RmClient(DEFAULT_CONFIG)
+    if args.send:
         rm.get_projects()
+        rm.send_mail()
+    elif args.wdd:
+        rm.get_without_due_date()
         rm.send_mail()
     else:
         if args.verbose:
