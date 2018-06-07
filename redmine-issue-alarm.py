@@ -63,9 +63,10 @@ DATA_BODY = {
 
 REPORT_HEAD_FORMAT=u'''{head:=^80}
 {project:^80}
+{sla:^80}
 {desc:-^80}
 {id:>5s} | {subject:32.32s} | {priority:6.6s} | {created_on:11s} | {delta}'''
-REPORT_DATA_FORMAT=u'{url}{id:5d} | {subject:32.32s} | {priority:6.6s} | {created_on:%d/%m %H:%M} | {delta}'
+REPORT_DATA_FORMAT=u'{id:5d} | {subject:32.32s} | {priority:6.6s} | {created_on:%d/%m %H:%M} | {delta}'
 REPORT_FOOT_FORMAT=u'{:=^80}'
 
 HTML_HEAD_FORMAT=u'''<P>
@@ -152,6 +153,7 @@ class RmClient(object):
     _verbose = False
     _debug = False
     _html = ''
+    data_exists = False
 
     def __init__(self, _conf):
         super(RmClient, self).__init__()
@@ -168,7 +170,14 @@ class RmClient(object):
     def _request(self, _req):
         req = urllib2.Request(url=self._request_url(_req))
         req.add_header('X-Redmine-API-Key', self._redmine['api-key'])
-        response = urllib2.urlopen(req).read()
+        try:
+            response = urllib2.urlopen(req).read()
+        except urllib2.HTTPError as e:
+            print e
+            return {}
+        except urllib2.URLError as e:
+            print e
+            return {}
         if self._debug:
             print json.dumps(json.loads(response), indent=2, ensure_ascii=False)
         return json.loads(response)
@@ -177,56 +186,72 @@ class RmClient(object):
         return self._request(_filter(_req, params))
 
     def get_projects(self):
+        self.data_exists = False
         response = self.request('projects.json')
-        for project in response['projects']:
-            if project.has_key('custom_fields'):
-                for custom_field in project['custom_fields']:
-                    if custom_field['value']:
-                        self.get_new_issues(project, custom_field['value'])
-        self._send_mail()
+        if response.has_key('projects'):
+            for project in response['projects']:
+                if project.has_key('custom_fields'):
+                    for custom_field in project['custom_fields']:
+                        if custom_field['value']:
+                            self.get_new_issues(project, custom_field['value'])
+            if self._verbose:
+                print REPORT_FOOT_FORMAT.format('')
 
     def _issues(self, project, sla, status):
         P_ISSUES['project_id'] = project['id']
         P_ISSUES['created_on'] = get_sla_delta(sla)
         P_ISSUES['status_id'] = status
-        response = self.request('issues.json', P_ISSUES)
-        DATA_HEAD['project']= '%s SLA: %s' % (project['name'],sla)
+        DATA_HEAD['project'] = project['name']
         DATA_HEAD['sla'] = sla
         DATA_HEAD['desc'] = SLA[sla]
-        DATA_BODY['url']=self._redmine['url']
+        DATA_BODY['url'] = self._redmine['url']
         self._html += HTML_HEAD_FORMAT.format(**DATA_HEAD)
         if self._verbose:
             print REPORT_HEAD_FORMAT.format(**DATA_HEAD)
-        for issue in response['issues']:
-            DATA_BODY['id'] = issue["id"]
-            DATA_BODY['subject'] = issue["subject"]
-            DATA_BODY['priority'] = issue["priority"]["name"]
-            DATA_BODY['created_on'] = from_rm_date(issue["created_on"])
-            DATA_BODY['delta'] = time_diff(issue["created_on"])
-            self._html += HTML_DATA_FORMAT.format(**DATA_BODY)
-            if self._verbose:
-                print REPORT_DATA_FORMAT.format(**DATA_BODY)
-        if self._verbose:
-            print REPORT_FOOT_FORMAT.format('')
+        response = self.request('issues.json', P_ISSUES)
+        if response.has_key('issues'):
+            for issue in response['issues']:
+                self.data_exists = True
+                DATA_BODY['id'] = issue["id"]
+                DATA_BODY['subject'] = issue["subject"]
+                DATA_BODY['priority'] = issue["priority"]["name"]
+                DATA_BODY['created_on'] = from_rm_date(issue["created_on"])
+                DATA_BODY['delta'] = time_diff(issue["created_on"])
+                self._html += HTML_DATA_FORMAT.format(**DATA_BODY)
+                if self._verbose:
+                    print REPORT_DATA_FORMAT.format(**DATA_BODY)
         self._html += HTML_FOOT_FORMAT
 
     def get_new_issues(self, project, sla):
         self._issues(project, sla, 1)
 
-    def _send_mail(self):
+    def send_mail(self):
         if self._debug:
             print HTML_FORMAT.format(DATA=self._html.encode('utf-8'))
-        html = HTML_FORMAT.format(DATA=self._html.encode('utf-8'))
-        msg = MIMEMultipart('alternative', None, [MIMEText(html, 'html','utf-8')])
-        msg['Subject'] = self._mail['subject']
-        msg['From'] = self._mail['from']
-        msg['To'] = self._mail['to']
-        server = smtplib.SMTP_SSL(self._mail['host'],self._mail['port'])
-        if self._debug:
-            server.set_debuglevel(1)
-        server.login(self._mail['user'], self._mail['password'])
-        server.sendmail(self._mail['from'], self._mail['to'].split(','), msg.as_string())
-        server.quit()
+        if self.data_exists:
+            html = HTML_FORMAT.format(DATA=self._html.encode('utf-8'))
+            msg = MIMEMultipart('alternative', None, [MIMEText(html, 'html','utf-8')])
+            msg['Subject'] = self._mail['subject']
+            msg['From'] = self._mail['from']
+            msg['To'] = self._mail['to']
+            server=None
+            try:
+                server = smtplib.SMTP_SSL(self._mail['host'],self._mail['port'])
+                if self._debug:
+                    server.set_debuglevel(1)
+                server.login(self._mail['user'], self._mail['password'])
+                server.sendmail(self._mail['from'], self._mail['to'].split(','), msg.as_string())
+                server.quit()
+            except smtplib.SMTPAuthenticationError as e:
+                print 'Send mail [SMTPAuthenticationError]:', e.smtp_code, e.smtp_error
+                server.quit()
+            except smtplib.SMTPRecipientsRefused as e:
+                print 'Send mail [SMTPRecipientsRefused]:'
+                for (k, v) in e.recipients.items():
+                    print k, v[0], v[1]
+                server.quit()
+            except Exception as e:
+                print 'Send mail error:', e
 
 
 def load_config(fname):
@@ -261,8 +286,13 @@ if __name__ == "__main__":
     if args.debug:
         print 'CONFIG:', json.dumps(DEFAULT_CONFIG, indent=2)
 
+    rm = RmClient(DEFAULT_CONFIG)
     if args.fix or args.send:
         rm = RmClient(DEFAULT_CONFIG)
         rm.get_projects()
+        rm.send_mail()
     else:
-        parser.print_help()
+        if args.verbose:
+            rm.get_projects()
+        else:
+            parser.print_help()
