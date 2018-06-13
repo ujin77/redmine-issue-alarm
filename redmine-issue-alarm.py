@@ -123,8 +123,28 @@ def utc_to_local(dt):
         return dt - timedelta(seconds = time.timezone)
 
 
+def local_to_utc(dt):
+    if time.localtime().tm_isdst:
+        return dt + timedelta(seconds = time.altzone)
+    else:
+        return dt + timedelta(seconds = time.timezone)
+
+
 def from_rm_date(str_date):
     return utc_to_local(datetime.strptime(str_date, RM_DATE_FMT))
+
+
+def date_from_redmine(str_date, to_local=False):
+    if to_local:
+        return utc_to_local(datetime.strptime(str_date, RM_DATE_FMT))
+    else:
+        return datetime.strptime(str_date, RM_DATE_FMT)
+
+
+def date_to_redmine(dt, to_utc=False):
+    if to_utc:
+        dt = local_to_utc(dt)
+    return dt.strftime(RM_DATE_FMT)
 
 
 def time_diff(date_string, minutes=False):
@@ -214,6 +234,22 @@ class RmClient(object):
         self._debug_response(response)
         return json.loads(response)
 
+    def put_issue(self, id, data):
+        req = urllib2.Request(url=self._request_url('issues/{}.json'.format(id)), data=json.dumps(data))
+        req.add_header('X-Redmine-API-Key', self._redmine['api-key'])
+        req.add_header('Content-Type', 'application/json')
+        req.get_method = lambda: 'PUT'
+        try:
+            response = urllib2.urlopen(req).read()
+        except urllib2.HTTPError as e:
+            print "Issue:", id, e, self._request_url('issues/{}.json'.format(id))
+            return {}
+        except urllib2.URLError as e:
+            print "Issue:", id, e, self._request_url('issues/{}.json'.format(id))
+            return {}
+        if self._verbose:
+            print "Issue:", id, 'updated', response
+
     def _debug_response(self, response):
         if self._debug and response:
         # if response:
@@ -295,6 +331,16 @@ class RmClient(object):
                         print REPORT_DATA_FORMAT.format(**DATA_BODY)
             self._html += HTML_FOOT_FORMAT
 
+    def fix_due_date(self):
+        params = requestParams(DEFAULT_PARAMS)
+        params.add('status_id', 'open')
+        response = self.request('issues.json', params)
+        if response.has_key('issues'):
+            for issue in response['issues']:
+                if not issue.has_key('due_date'):
+                    due_date = date_from_redmine(issue["created_on"]) + timedelta(days=14)
+                    self.put_issue(issue["id"], {"issue": {"due_date": due_date.strftime("%Y-%m-%d")}})
+
     def send_mail(self):
         if self._debug:
             print HTML_FORMAT.format(DATA=self._html.encode('utf-8'))
@@ -363,6 +409,8 @@ if __name__ == "__main__":
         rm.issues_new()
     elif args.wdd:
         rm.issues_without_due_date()
+    elif args.fix:
+        rm.fix_due_date()
     else:
         parser.print_help()
     if args.send:
